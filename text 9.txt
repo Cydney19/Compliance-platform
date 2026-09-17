@@ -1,0 +1,2 @@
+DATABASE_URL=sqlite:///./compliance.db
+REMINDER_HOUR=7

@@ -1,0 +1,6 @@
+compliance-platform/
+├── main.py
+├── models.py
+├── db.py
+├── requirements.txt
+└── .env

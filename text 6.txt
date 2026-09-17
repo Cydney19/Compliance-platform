@@ -1,0 +1,24 @@
+from datetime import date, timedelta
+from apscheduler.schedulers.blocking import BlockingScheduler
+from db import SessionLocal
+from models import Check
+
+def daily_digest():
+    db = SessionLocal()
+    try:
+        soon = date.today() + timedelta(days=30)
+        due = (db.query(Check)
+                 .filter(Check.last_completed + Check.frequency_days <= soon)
+                 .all())
+        overdue = [c for c in due if c.rag == "Red"]
+        warning = [c for c in due if c.rag == "Amber"]
+        # swap this print for an email / Teams webhook call
+        print(f"Overdue: {[c.name for c in overdue]}")
+        print(f"Due in 30 days: {[c.name for c in warning]}")
+    finally:
+        db.close()
+
+if __name__ == "__main__":
+    sched = BlockingScheduler()
+    sched.add_job(daily_digest, "cron", hour=7, minute=0)
+    sched.start()

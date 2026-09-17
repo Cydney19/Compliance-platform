@@ -1,0 +1,112 @@
+from datetime import date, timedelta
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
+from apscheduler.schedulers.background import BackgroundScheduler
+from pydantic import BaseModel
+
+from db import Base, engine, get_db
+from models import School, Check, Category
+
+Base.metadata.create_all(bind=engine)
+app = FastAPI(title="Statutory Compliance Platform")
+
+
+# --- Schemas ---
+class SchoolIn(BaseModel):
+    name: str
+
+class CheckIn(BaseModel):
+    school_id: int
+    name: str
+    category: Category = Category.other
+    frequency_days: int
+    last_completed: date
+
+class CheckOut(CheckIn):
+    id: int
+    next_due: date
+    rag: str
+
+    model_config = {"from_attributes": True}
+
+
+# --- Schools ---
+@app.post("/schools", response_model=SchoolIn)
+def create_school(payload: SchoolIn, db: Session = Depends(get_db)):
+    if db.query(School).filter_by(name=payload.name).first():
+        raise HTTPException(400, "School already exists")
+    school = School(name=payload.name)
+    db.add(school)
+    db.commit()
+    db.refresh(school)
+    return school
+
+@app.get("/schools")
+def list_schools(db: Session = Depends(get_db)):
+    return db.query(School).all()
+
+
+# --- Checks ---
+@app.post("/checks", response_model=CheckOut)
+def create_check(payload: CheckIn, db: Session = Depends(get_db)):
+    if not db.get(School, payload.school_id):
+        raise HTTPException(404, "School not found")
+    check = Check(**payload.model_dump())
+    db.add(check)
+    db.commit()
+    db.refresh(check)
+    return check
+
+@app.get("/schools/{school_id}/checks", response_model=list[CheckOut])
+def list_checks(school_id: int, db: Session = Depends(get_db)):
+    return db.query(Check).filter_by(school_id=school_id).all()
+
+@app.post("/checks/{check_id}/complete", response_model=CheckOut)
+def mark_complete(check_id: int, completed_on: date | None = None, db: Session = Depends(get_db)):
+    check = db.get(Check, check_id)
+    if not check:
+        raise HTTPException(404, "Check not found")
+    check.last_completed = completed_on or date.today()
+    db.commit()
+    db.refresh(check)
+    return check
+
+
+# --- Reporting ---
+@app.get("/dashboard")
+def dashboard(db: Session = Depends(get_db)):
+    """Every check across all schools, worst RAG first."""
+    order = {"Red": 0, "Amber": 1, "Green": 2}
+    rows = db.query(Check).all()
+    rows.sort(key=lambda c: (order[c.rag], c.next_due))
+    return [
+        {
+            "school": c.school.name,
+            "check": c.name,
+            "category": c.category.value,
+            "next_due": c.next_due,
+            "rag": c.rag,
+        }
+        for c in rows
+    ]
+
+
+# --- Daily reminder job ---
+def send_reminders():
+    """Runs daily. Replace the print with Graph/email sending later."""
+    with next(get_db()) as db:  # type: ignore
+        pass
+    from db import SessionLocal
+    db = SessionLocal()
+    try:
+        horizon = date.today() + timedelta(days=30)
+        due = db.query(Check).filter(Check.last_completed != None).all()
+        for c in due:
+            if c.next_due <= horizon:
+                print(f"[REMINDER] {c.school.name}: '{c.name}' due {c.next_due} ({c.rag})")
+    finally:
+        db.close()
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(send_reminders, "cron", hour=7, minute=0)
+scheduler.start()
